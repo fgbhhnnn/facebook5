@@ -35,13 +35,14 @@ class ConfigManager:
     """配置管理器"""
     
     @staticmethod
-    def save_config(thread_count: int, cookies: List[str]) -> bool:
+    def save_config(thread_count: int, cookies: List[str], headless: bool = False) -> bool:
         """
         保存配置到文件
         
         Args:
             thread_count: 线程数量
             cookies: Cookie列表
+            headless: 是否使用无头模式
             
         Returns:
             是否保存成功
@@ -49,7 +50,8 @@ class ConfigManager:
         try:
             config = {
                 'thread_count': thread_count,
-                'cookies': cookies
+                'cookies': cookies,
+                'headless': headless
             }
             
             # 确保配置目录存在
@@ -74,7 +76,7 @@ class ConfigManager:
         """
         try:
             if not os.path.exists(CONFIG_FILE):
-                return {'thread_count': DEFAULT_THREAD_COUNT, 'cookies': []}
+                return {'thread_count': DEFAULT_THREAD_COUNT, 'cookies': [], 'headless': False}
             
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 config = json.load(f)
@@ -83,4 +85,4 @@ class ConfigManager:
             return config
         except Exception as e:
             print(f"加载配置失败: {e}")
-            return {'thread_count': DEFAULT_THREAD_COUNT, 'cookies': []}
+            return {'thread_count': DEFAULT_THREAD_COUNT, 'cookies': [], 'headless': False}

@@ -118,9 +118,8 @@ class BrowserAutomation:
         if self.headless:
             chrome_options.add_argument('--headless')
         
-        # 设置随机窗口大小
-        width, height = fingerprint['resolution']
-        chrome_options.add_argument(f'--window-size={width},{height}')
+        # 设置固定窗口大小为400*400
+        chrome_options.add_argument('--window-size=400,400')
         
         # 禁用一些不必要的功能
         chrome_options.add_argument('--disable-gpu')
@@ -161,11 +160,17 @@ class BrowserAutomation:
             print("正在初始化Chrome浏览器（使用undetected-chromedriver）...")
             
             # 创建驱动，undetected-chromedriver会自动处理ChromeDriver的下载和配置
+            # 添加更多参数来避免版本检测问题
             self.driver = uc.Chrome(
                 options=chrome_options,
                 version_main=None,  # 自动检测Chrome版本
                 use_subprocess=True,  # 使用子进程
-                keep_alive=True  # 保持连接
+                keep_alive=True,  # 保持连接
+                driver_executable_path=None,  # 让undetected-chromedriver自动管理driver
+                browser_executable_path=None,  # 自动查找Chrome浏览器
+                suppress_welcome=True,  # 抑制欢迎信息
+                no_sandbox=True,  # 禁用沙箱
+                disable_gpu=True  # 禁用GPU
             )
             
             # 设置隐式等待

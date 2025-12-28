@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSpinBox, QTextEdit,
     QScrollArea, QFileDialog, QMessageBox, QGroupBox, QFrame,
-    QTableWidget, QTableWidgetItem, QHeaderView
+    QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -25,10 +25,11 @@ class CheckWorker(QThread):
     finished_signal = pyqtSignal(list)
     result_signal = pyqtSignal(tuple)  # 实时结果信号
     
-    def __init__(self, profiles: List[tuple], cookies: List[str]):
+    def __init__(self, profiles: List[tuple], cookies: List[str], headless: bool = False):
         super().__init__()
         self.profiles = profiles
         self.cookies = cookies
+        self.headless = headless
         self._is_running = True  # 运行标志
     
     def stop(self):
@@ -42,7 +43,7 @@ class CheckWorker(QThread):
         # 为每个Cookie创建一个FriendChecker实例（复用浏览器）
         checkers = []
         for cookie_string in self.cookies:
-            checker = FriendChecker(cookie_string, headless=False)
+            checker = FriendChecker(cookie_string, headless=self.headless)
             checkers.append(checker)
         
         try:
@@ -190,8 +191,14 @@ class MainWindow(QMainWindow):
         self.thread_spinbox.setFont(QFont('Arial', 10))
         self.thread_spinbox.valueChanged.connect(self.update_cookie_inputs)
         
+        # 无头模式复选框
+        self.headless_checkbox = QCheckBox('无头模式')
+        self.headless_checkbox.setFont(QFont('Arial', 10))
+        self.headless_checkbox.setToolTip('勾选后浏览器将在后台运行，不显示窗口')
+        
         layout.addWidget(thread_label)
         layout.addWidget(self.thread_spinbox)
+        layout.addWidget(self.headless_checkbox)
         layout.addStretch()
         
         group.setLayout(layout)
@@ -356,7 +363,8 @@ class MainWindow(QMainWindow):
         
         # 保存配置
         thread_count = self.thread_spinbox.value()
-        ConfigManager.save_config(thread_count, cookies)
+        headless = self.headless_checkbox.isChecked()
+        ConfigManager.save_config(thread_count, cookies, headless)
         
         # 禁用按钮
         self.start_button.setEnabled(False)
@@ -369,7 +377,8 @@ class MainWindow(QMainWindow):
         self.result_row_count = 0  # 重置行数计数器
         
         # 创建并启动工作线程
-        self.worker = CheckWorker(self.profiles, cookies)
+        headless = self.headless_checkbox.isChecked()
+        self.worker = CheckWorker(self.profiles, cookies, headless)
         self.worker.file_path = self.file_path_edit.text()  # 传递文件路径
         self.worker.progress_signal.connect(self.on_progress)
         self.worker.finished_signal.connect(self.on_finished)
@@ -492,13 +501,17 @@ class MainWindow(QMainWindow):
         thread_count = config.get('thread_count', DEFAULT_THREAD_COUNT)
         self.thread_spinbox.setValue(thread_count)
         
+        # 设置无头模式
+        headless = config.get('headless', False)
+        self.headless_checkbox.setChecked(headless)
+        
         # 设置Cookie
         cookies = config.get('cookies', [])
         for i, cookie in enumerate(cookies):
             if i < len(self.cookie_inputs):
                 self.cookie_inputs[i].setText(cookie)
         
-        print(f"已加载配置: 线程数={thread_count}, Cookie数={len(cookies)}")
+        print(f"已加载配置: 线程数={thread_count}, Cookie数={len(cookies)}, 无头模式={headless}")
     
     def adjust_window_size(self, thread_count: int):
         """根据线程数量动态调整窗口大小"""
