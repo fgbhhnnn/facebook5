@@ -186,7 +186,7 @@ class MainWindow(QMainWindow):
         
         self.thread_spinbox = QSpinBox()
         self.thread_spinbox.setMinimum(1)
-        self.thread_spinbox.setMaximum(10)
+        self.thread_spinbox.setMaximum(20)
         self.thread_spinbox.setValue(DEFAULT_THREAD_COUNT)
         self.thread_spinbox.setFont(QFont('Arial', 10))
         self.thread_spinbox.valueChanged.connect(self.update_cookie_inputs)
@@ -268,9 +268,9 @@ class MainWindow(QMainWindow):
         return group
     
     def init_cookie_inputs(self):
-        """初始化Cookie输入框（预先创建10个）"""
-        # 预先创建10个Cookie输入框
-        for i in range(10):
+        """初始化Cookie输入框（预先创建20个）"""
+        # 预先创建20个Cookie输入框
+        for i in range(20):
             # 为每个Cookie创建一个水平布局
             cookie_row = QWidget()
             row_layout = QHBoxLayout(cookie_row)
@@ -307,7 +307,7 @@ class MainWindow(QMainWindow):
         thread_count = self.thread_spinbox.value()
         
         # 只显示/隐藏，不创建/删除
-        for i in range(10):
+        for i in range(20):
             if i < thread_count:
                 self.cookie_rows[i].show()
             else:

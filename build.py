@@ -43,7 +43,7 @@ def build_exe():
             print("使用命令行参数进行打包...")
             cmd = [
                 sys.executable, "-m", "PyInstaller",
-                "--name=FacebookFriendChecker",
+                "--name=Facebook好友可见性检查工具",
                 "--windowed",  # 不显示控制台窗口
                 "--onefile",   # 打包成单个exe文件
                 "--add-data=config;config",  # 添加配置目录
@@ -69,7 +69,7 @@ def create_portable_package():
     os.makedirs(release_dir)
     
     # 复制exe文件
-    exe_source = os.path.join("dist", "FacebookFriendChecker.exe")
+    exe_source = os.path.join("dist", "Facebook好友可见性检查工具.exe")
     if os.path.exists(exe_source):
         shutil.copy2(exe_source, release_dir)
         print(f"✓ 已复制 {exe_source} 到 {release_dir}")

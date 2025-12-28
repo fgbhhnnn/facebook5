@@ -24,7 +24,7 @@ if errorlevel 1 (
 echo.
 echo [3/3] 打包完成！
 echo.
-echo 可执行文件位置: dist\FacebookFriendChecker.exe
+echo 可执行文件位置: dist\Facebook好友可见性检查工具.exe
 echo.
 echo ========================================
 pause
