@@ -1,0 +1,4 @@
+PyQt5==5.15.10
+selenium==4.15.2
+undetected-chromedriver==3.5.4
+pyinstaller==6.17.0
