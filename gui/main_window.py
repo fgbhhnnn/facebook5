@@ -5,13 +5,14 @@ GUI主窗口模块
 import sys
 import os
 from typing import List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSpinBox, QTextEdit,
     QScrollArea, QFileDialog, QMessageBox, QGroupBox, QFrame,
-    QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox
+    QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QDesktopWidget
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMutex, QMutexLocker
 from PyQt5.QtGui import QFont
 from core import FriendChecker
 from utils import FileParser
@@ -19,7 +20,7 @@ from config import DEFAULT_THREAD_COUNT, ConfigManager
 
 
 class CheckWorker(QThread):
-    """检查工作线程"""
+    """检查工作线程 - 使用线程池实现真正的并行执行"""
     
     progress_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(list)
@@ -31,65 +32,191 @@ class CheckWorker(QThread):
         self.cookies = cookies
         self.headless = headless
         self._is_running = True  # 运行标志
+        self._mutex = QMutex()  # 线程安全锁
+        self._results = []  # 存储结果
+        self._completed_count = 0  # 已完成任务计数
+        self._checkers = []  # 存储所有checker实例，用于关闭浏览器
+        self._executor = None  # 线程池执行器
     
     def stop(self):
         """停止检查"""
-        self._is_running = False
+        with QMutexLocker(self._mutex):
+            self._is_running = False
+        
+        # 立即关闭所有浏览器
+        self._close_all_browsers()
+    
+    def _close_all_browsers(self):
+        """关闭所有浏览器实例"""
+        for checker in self._checkers:
+            try:
+                checker.close()
+            except Exception as e:
+                print(f"关闭浏览器时出错: {e}")
+        self._checkers.clear()
+    
+    def _initialize_checker(self, checker: FriendChecker, index: int) -> bool:
+        """
+        初始化单个checker的浏览器
+        
+        Args:
+            checker: FriendChecker实例
+            index: checker索引
+            
+        Returns:
+            是否初始化成功
+        """
+        try:
+            self.progress_signal.emit(f"正在初始化浏览器 {index + 1}/{len(self._checkers)}...")
+            
+            # 初始化浏览器并恢复Cookie
+            if not checker.initialize_browser():
+                self.progress_signal.emit(f"浏览器 {index + 1} 初始化失败")
+                return False
+            
+            self.progress_signal.emit(f"✓ 浏览器 {index + 1} 初始化完成")
+            return True
+            
+        except Exception as e:
+            self.progress_signal.emit(f"浏览器 {index + 1} 初始化出错: {str(e)}")
+            return False
+    
+    def _check_single_profile(self, checker: FriendChecker, url: str, name: str) -> tuple:
+        """
+        检查单个用户主页（在独立线程中执行）
+        
+        Args:
+            checker: FriendChecker实例
+            url: 用户主页URL
+            name: 用户名称
+            
+        Returns:
+            检查结果元组
+        """
+        try:
+            # 检查是否被停止
+            with QMutexLocker(self._mutex):
+                if not self._is_running:
+                    return (url, name, False, "检查已停止", False)
+            
+            is_visible, message, is_valid = checker.check_friend_visibility(url, name)
+            result = (url, name, is_visible, message, is_valid)
+            
+            # 检查完成后，从文件中删除这个链接
+            if hasattr(self, 'file_path') and self.file_path:
+                FileParser.remove_checked_link(self.file_path, url)
+            
+            return result
+            
+        except Exception as e:
+            error_msg = str(e)
+            # 提供更友好的错误信息
+            if "WinError 193" in error_msg or "不是有效的 Win32 应用程序" in error_msg:
+                error_msg = "ChromeDriver版本不兼容，请重新安装依赖"
+            return (url, name, False, f"检查失败: {error_msg}", False)
     
     def run(self):
-        """执行检查任务"""
-        results = []
-        
-        # 为每个Cookie创建一个FriendChecker实例（复用浏览器）
-        checkers = []
-        for cookie_string in self.cookies:
-            checker = FriendChecker(cookie_string, headless=self.headless)
-            checkers.append(checker)
+        """执行检查任务 - 使用线程池并行执行"""
+        # 为每个Cookie创建一个FriendChecker实例（每个线程独立使用）
+        self._checkers = []
+        total_threads = len(self.cookies)
+        for i, cookie_string in enumerate(self.cookies):
+            checker = FriendChecker(cookie_string, headless=self.headless, thread_index=i, total_threads=total_threads)
+            self._checkers.append(checker)
         
         try:
+            # 第一步：初始化所有浏览器（确保浏览器正常打开后再开始检测）
+            self.progress_signal.emit("正在初始化浏览器...")
+            initialized_checkers = []
+            
+            for i, checker in enumerate(self._checkers):
+                # 检查是否被停止
+                with QMutexLocker(self._mutex):
+                    if not self._is_running:
+                        self.progress_signal.emit("检查已停止")
+                        break
+                
+                # 初始化浏览器
+                if self._initialize_checker(checker, i):
+                    initialized_checkers.append(checker)
+                else:
+                    self.progress_signal.emit(f"警告: 浏览器 {i + 1} 初始化失败，将跳过")
+            
+            # 如果没有成功初始化的浏览器，直接返回
+            if not initialized_checkers:
+                self.progress_signal.emit("没有可用的浏览器，检查终止")
+                self.finished_signal.emit(self._results)
+                return
+            
+            self.progress_signal.emit(f"✓ 所有浏览器初始化完成，共 {len(initialized_checkers)} 个可用")
+            
+            # 第二步：使用线程池并行执行任务
+            # max_workers 设置为已初始化的 checker 数量
+            self._executor = ThreadPoolExecutor(max_workers=len(initialized_checkers))
+            
+            # 创建任务列表
+            future_to_profile = {}
             for i, (url, name) in enumerate(self.profiles):
                 # 检查是否被停止
-                if not self._is_running:
-                    self.progress_signal.emit("检查已停止")
-                    break
+                with QMutexLocker(self._mutex):
+                    if not self._is_running:
+                        self.progress_signal.emit("检查已停止")
+                        break
                 
-                # 轮询使用cookie
-                cookie_index = i % len(self.cookies)
-                checker = checkers[cookie_index]
+                # 轮询使用已初始化的checker
+                checker_index = i % len(initialized_checkers)
+                checker = initialized_checkers[checker_index]
                 
                 self.progress_signal.emit(f"正在检查: {name}...")
                 
+                # 提交任务到线程池
+                future = self._executor.submit(self._check_single_profile, checker, url, name)
+                future_to_profile[future] = (url, name)
+            
+            # 等待所有任务完成并收集结果
+            for future in as_completed(future_to_profile):
+                # 检查是否被停止
+                with QMutexLocker(self._mutex):
+                    if not self._is_running:
+                        break
+                
                 try:
-                    is_visible, message, is_valid = checker.check_friend_visibility(url, name)
-                    result = (url, name, is_visible, message, is_valid)
-                    results.append(result)
+                    result = future.result()
+                    url, name = result[0], result[1]
+                    
+                    # 线程安全地添加结果
+                    with QMutexLocker(self._mutex):
+                        self._results.append(result)
+                        self._completed_count += 1
                     
                     # 实时发送结果到主线程
                     self.result_signal.emit(result)
+                    self.progress_signal.emit(f"✓ {name} 检查完成 ({self._completed_count}/{len(self.profiles)})")
                     
-                    # 检查完成后，从文件中删除这个链接
-                    if hasattr(self, 'file_path') and self.file_path:
-                        FileParser.remove_checked_link(self.file_path, url)
-                        self.progress_signal.emit(f"✓ {name} 检查完成，已从文件中移除")
-                        
                 except Exception as e:
-                    error_msg = str(e)
-                    # 提供更友好的错误信息
-                    if "WinError 193" in error_msg or "不是有效的 Win32 应用程序" in error_msg:
-                        error_msg = "ChromeDriver版本不兼容，请重新安装依赖"
-                    result = (url, name, False, f"检查失败: {error_msg}", False)
-                    results.append(result)
+                    url, name = future_to_profile[future]
+                    error_msg = f"检查失败: {str(e)}"
+                    result = (url, name, False, error_msg, False)
+                    
+                    with QMutexLocker(self._mutex):
+                        self._results.append(result)
+                        self._completed_count += 1
+                    
                     self.result_signal.emit(result)
         
-        finally:
-            # 关闭所有浏览器
-            for checker in checkers:
-                try:
-                    checker.close()
-                except:
-                    pass
+        except Exception as e:
+            self.progress_signal.emit(f"执行过程中出错: {str(e)}")
         
-        self.finished_signal.emit(results)
+        finally:
+            # 关闭线程池
+            if self._executor:
+                self._executor.shutdown(wait=False)
+            
+            # 关闭所有浏览器
+            self._close_all_browsers()
+        
+        # 发送完成信号
+        self.finished_signal.emit(self._results)
 
 
 class MainWindow(QMainWindow):
@@ -103,6 +230,7 @@ class MainWindow(QMainWindow):
         self.check_results = []  # 存储检查结果
         self.worker = None
         self.result_row_count = 0  # 结果表格行数计数器
+        self.screen = QDesktopWidget().screenGeometry()  # 获取屏幕尺寸
         self.init_ui()
         self.load_config()  # 加载保存的配置
     
@@ -212,12 +340,14 @@ class MainWindow(QMainWindow):
         # 创建滚动区域
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(200)
+        # 不设置固定高度，让内容自适应
+        scroll.setMinimumHeight(100)
         
         # Cookie输入容器
         self.cookie_container = QWidget()
         self.cookie_layout = QVBoxLayout(self.cookie_container)
-        self.cookie_layout.setSpacing(10)
+        self.cookie_layout.setSpacing(8)
+        self.cookie_layout.setContentsMargins(5, 5, 5, 5)
         
         scroll.setWidget(self.cookie_container)
         layout.addWidget(scroll)
@@ -275,12 +405,13 @@ class MainWindow(QMainWindow):
             cookie_row = QWidget()
             row_layout = QHBoxLayout(cookie_row)
             row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(10)
+            row_layout.setSpacing(8)
             
             # 创建标签
             label = QLabel(f'Cookie {i + 1}:')
             label.setFont(QFont('Arial', 9))
-            label.setMinimumWidth(80)
+            label.setMinimumWidth(70)
+            label.setMaximumWidth(70)
             
             # 创建输入框
             input_field = QLineEdit()
@@ -514,22 +645,55 @@ class MainWindow(QMainWindow):
         print(f"已加载配置: 线程数={thread_count}, Cookie数={len(cookies)}, 无头模式={headless}")
     
     def adjust_window_size(self, thread_count: int):
-        """根据线程数量动态调整窗口大小"""
-        # 基础高度
-        base_height = 800
-        # 每增加一个线程增加的高度
-        height_per_thread = 30
+        """根据线程数量动态调整窗口大小，使其正好排满屏幕"""
+        # 获取屏幕尺寸
+        screen_width = self.screen.width()
+        screen_height = self.screen.height()
         
-        # 计算新高度
-        new_height = base_height + (thread_count - 1) * height_per_thread
+        # 窗口边距（留出一些空间给任务栏等）
+        margin = 50
+        available_width = screen_width - margin * 2
+        available_height = screen_height - margin * 2
         
-        # 限制最大高度
-        max_height = 1200
-        new_height = min(new_height, max_height)
+        # 计算各个组件的高度
+        # 标题高度
+        title_height = 50
+        # 线程设置高度
+        thread_group_height = 60
+        # Cookie设置高度（根据线程数量动态计算）
+        # 每个 Cookie 行高度约 35px，加上滚动区域边距
+        cookie_row_height = 35
+        cookie_group_height = min(cookie_row_height * thread_count + 30, available_height * 0.4)
+        # 文件上传高度
+        file_group_height = 60
+        # 按钮区域高度
+        button_height = 60
+        # 结果显示区域高度（剩余空间）
+        result_group_height = available_height - title_height - thread_group_height - cookie_group_height - file_group_height - button_height - 100
+        
+        # 确保结果区域至少有 200px 高度
+        result_group_height = max(result_group_height, 200)
+        
+        # 计算总高度
+        total_height = title_height + thread_group_height + cookie_group_height + file_group_height + button_height + result_group_height + 100
+        
+        # 确保不超过屏幕可用高度
+        total_height = min(total_height, available_height)
+        
+        # 设置窗口宽度（使用屏幕宽度的 90%）
+        window_width = int(available_width * 0.9)
+        # 确保窗口宽度至少 1000px
+        window_width = max(window_width, 1000)
         
         # 设置窗口大小
-        self.resize(1100, new_height)
-        print(f"窗口大小已调整为: 1100 x {new_height}")
+        self.resize(window_width, total_height)
+        
+        # 居中显示窗口
+        x = (screen_width - window_width) // 2
+        y = (screen_height - total_height) // 2
+        self.move(x, y)
+        
+        print(f"窗口大小已调整为: {window_width} x {total_height} (屏幕: {screen_width} x {screen_height})")
     
     def closeEvent(self, event):
         """关闭窗口事件"""

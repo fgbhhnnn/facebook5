@@ -91,15 +91,19 @@ class FingerprintGenerator:
 class BrowserAutomation:
     """浏览器自动化类"""
     
-    def __init__(self, headless: bool = False):
+    def __init__(self, headless: bool = False, thread_index: int = 0, total_threads: int = 1):
         """
         初始化浏览器自动化
         
         Args:
             headless: 是否使用无头模式
+            thread_index: 当前线程索引（从0开始）
+            total_threads: 总线程数
         """
         self.driver: Optional[uc.Chrome] = None
         self.headless = headless
+        self.thread_index = thread_index
+        self.total_threads = total_threads
     
     def create_driver(self) -> uc.Chrome:
         """
@@ -118,8 +122,14 @@ class BrowserAutomation:
         if self.headless:
             chrome_options.add_argument('--headless')
         
-        # 设置固定窗口大小为400*400
-        chrome_options.add_argument('--window-size=400,400')
+        # 根据线程数量计算浏览器窗口大小和位置
+        window_width, window_height, window_x, window_y = self._calculate_window_position()
+        
+        # 设置窗口大小
+        chrome_options.add_argument(f'--window-size={window_width},{window_height}')
+        
+        # 设置窗口位置
+        chrome_options.add_argument(f'--window-position={window_x},{window_y}')
         
         # 禁用一些不必要的功能
         chrome_options.add_argument('--disable-gpu')
@@ -128,7 +138,7 @@ class BrowserAutomation:
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
         chrome_options.add_argument('--disable-extensions')
         chrome_options.add_argument('--disable-infobars')
-        chrome_options.add_argument('--start-maximized')
+        # 移除 --start-maximized，避免与自定义窗口大小冲突
         
         # 设置随机用户代理
         chrome_options.add_argument(f'user-agent={fingerprint["user_agent"]}')
@@ -176,6 +186,12 @@ class BrowserAutomation:
             # 设置隐式等待
             self.driver.implicitly_wait(BROWSER_CONFIG['implicit_wait'])
             self.driver.set_page_load_timeout(BROWSER_CONFIG['page_load_timeout'])
+            
+            # 在浏览器启动后设置窗口大小和位置（更可靠）
+            if not self.headless:
+                self.driver.set_window_position(window_x, window_y)
+                self.driver.set_window_size(window_width, window_height)
+                print(f"浏览器窗口已设置: 位置=({window_x}, {window_y}), 大小=({window_width}x{window_height})")
             
             print("Chrome浏览器启动成功")
             return self.driver
@@ -240,6 +256,49 @@ class BrowserAutomation:
         except Exception as e:
             print(f"等待页面加载超时: {e}")
             return False
+    
+    def _calculate_window_position(self) -> tuple:
+        """
+        根据线程数量计算浏览器窗口的大小和位置
+        
+        Returns:
+            (width, height, x, y) 窗口宽高和位置
+        """
+        try:
+            # 获取屏幕尺寸
+            from selenium import webdriver
+            temp_driver = webdriver.Chrome(options=Options())
+            screen_width = temp_driver.execute_script("return window.screen.width")
+            screen_height = temp_driver.execute_script("return window.screen.height")
+            temp_driver.quit()
+        except:
+            # 如果获取失败，使用默认值
+            screen_width = 1920
+            screen_height = 1080
+        
+        # 计算网格布局（行数和列数）
+        cols = int((self.total_threads ** 0.5) + 0.5)  # 列数约为线程数的平方根
+        rows = (self.total_threads + cols - 1) // cols  # 行数向上取整
+        
+        # 计算每个浏览器窗口的大小
+        margin = 10  # 窗口之间的间距
+        window_width = (screen_width - margin * (cols + 1)) // cols
+        window_height = (screen_height - margin * (rows + 1)) // rows
+        
+        # 确保窗口大小合理
+        window_width = max(window_width, 300)
+        window_height = max(window_height, 300)
+        
+        # 计算当前窗口的位置
+        col = self.thread_index % cols
+        row = self.thread_index // cols
+        
+        window_x = margin + col * (window_width + margin)
+        window_y = margin + row * (window_height + margin)
+        
+        print(f"浏览器 {self.thread_index + 1}/{self.total_threads}: 位置=({window_x}, {window_y}), 大小=({window_width}x{window_height})")
+        
+        return (window_width, window_height, window_x, window_y)
     
     def get_page_source(self) -> str:
         """

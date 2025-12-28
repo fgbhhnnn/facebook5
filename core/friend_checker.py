@@ -16,16 +16,18 @@ from .browser_automation import BrowserAutomation
 class FriendChecker:
     """好友可见性检查器"""
     
-    def __init__(self, cookie_string: str, headless: bool = False):
+    def __init__(self, cookie_string: str, headless: bool = False, thread_index: int = 0, total_threads: int = 1):
         """
         初始化好友检查器
         
         Args:
             cookie_string: Facebook Cookie字符串
             headless: 是否使用无头模式
+            thread_index: 当前线程索引（从0开始）
+            total_threads: 总线程数
         """
         self.cookie_string = cookie_string
-        self.browser = BrowserAutomation(headless=headless)
+        self.browser = BrowserAutomation(headless=headless, thread_index=thread_index, total_threads=total_threads)
         self.driver: Optional[webdriver.Chrome] = None
         self.cookie_restored = False  # 标记Cookie是否已恢复
     
