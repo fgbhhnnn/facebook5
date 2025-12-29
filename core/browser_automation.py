@@ -118,18 +118,20 @@ class BrowserAutomation:
         fingerprint = FingerprintGenerator.generate_random_fingerprint()
         print(f"使用随机浏览器指纹: {fingerprint['user_agent'][:50]}...")
         
-        # 设置无头模式（始终为False，显示浏览器窗口）
+        # 设置无头模式
         if self.headless:
             chrome_options.add_argument('--headless')
         
-        # 根据线程数量计算浏览器窗口大小和位置
-        window_width, window_height, window_x, window_y = self._calculate_window_position()
-        
-        # 设置窗口大小
-        chrome_options.add_argument(f'--window-size={window_width},{window_height}')
-        
-        # 设置窗口位置
-        chrome_options.add_argument(f'--window-position={window_x},{window_y}')
+        # 只有在非无头模式下才计算和设置浏览器窗口大小和位置
+        if not self.headless:
+            # 根据线程数量计算浏览器窗口大小和位置
+            window_width, window_height, window_x, window_y = self._calculate_window_position()
+            
+            # 设置窗口大小
+            chrome_options.add_argument(f'--window-size={window_width},{window_height}')
+            
+            # 设置窗口位置
+            chrome_options.add_argument(f'--window-position={window_x},{window_y}')
         
         # 禁用一些不必要的功能
         chrome_options.add_argument('--disable-gpu')
@@ -187,11 +189,15 @@ class BrowserAutomation:
             self.driver.implicitly_wait(BROWSER_CONFIG['implicit_wait'])
             self.driver.set_page_load_timeout(BROWSER_CONFIG['page_load_timeout'])
             
-            # 在浏览器启动后设置窗口大小和位置（更可靠）
+            # 在浏览器启动后设置窗口大小和位置（更可靠，仅在非无头模式下）
             if not self.headless:
+                # 重新计算窗口位置和大小（确保与启动时一致）
+                window_width, window_height, window_x, window_y = self._calculate_window_position()
                 self.driver.set_window_position(window_x, window_y)
                 self.driver.set_window_size(window_width, window_height)
                 print(f"浏览器窗口已设置: 位置=({window_x}, {window_y}), 大小=({window_width}x{window_height})")
+            else:
+                print("无头模式：不设置浏览器窗口位置和大小")
             
             print("Chrome浏览器启动成功")
             return self.driver

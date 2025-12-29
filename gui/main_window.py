@@ -4,6 +4,7 @@ GUI主窗口模块
 """
 import sys
 import os
+import queue
 from typing import List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5.QtWidgets import (
@@ -26,17 +27,19 @@ class CheckWorker(QThread):
     finished_signal = pyqtSignal(list)
     result_signal = pyqtSignal(tuple)  # 实时结果信号
     
-    def __init__(self, profiles: List[tuple], cookies: List[str], headless: bool = False):
+    def __init__(self, profiles: List[tuple], cookies: List[str], headless: bool = False, thread_count: int = None):
         super().__init__()
         self.profiles = profiles
         self.cookies = cookies
         self.headless = headless
+        self.thread_count = thread_count  # 添加线程数参数
         self._is_running = True  # 运行标志
         self._mutex = QMutex()  # 线程安全锁
         self._results = []  # 存储结果
         self._completed_count = 0  # 已完成任务计数
         self._checkers = []  # 存储所有checker实例，用于关闭浏览器
         self._executor = None  # 线程池执行器
+        self._profile_queue = queue.Queue()  # 线程安全的链接队列
     
     def stop(self):
         """停止检查"""
@@ -81,19 +84,23 @@ class CheckWorker(QThread):
             self.progress_signal.emit(f"浏览器 {index + 1} 初始化出错: {str(e)}")
             return False
     
-    def _check_single_profile(self, checker: FriendChecker, url: str, name: str) -> tuple:
+    def _check_single_profile(self, checker: FriendChecker) -> tuple:
         """
-        检查单个用户主页（在独立线程中执行）
+        从队列中获取链接并检查（在独立线程中执行）
         
         Args:
             checker: FriendChecker实例
-            url: 用户主页URL
-            name: 用户名称
             
         Returns:
             检查结果元组
         """
         try:
+            # 从队列中获取链接（线程安全）
+            try:
+                url, name = self._profile_queue.get(timeout=1)
+            except queue.Empty:
+                return None  # 队列为空，返回None
+            
             # 检查是否被停止
             with QMutexLocker(self._mutex):
                 if not self._is_running:
@@ -119,8 +126,11 @@ class CheckWorker(QThread):
         """执行检查任务 - 使用线程池并行执行"""
         # 为每个Cookie创建一个FriendChecker实例（每个线程独立使用）
         self._checkers = []
-        total_threads = len(self.cookies)
-        for i, cookie_string in enumerate(self.cookies):
+        # 使用设置的线程数，如果没有设置则使用Cookie数量
+        total_threads = self.thread_count if self.thread_count is not None else len(self.cookies)
+        # 只使用前 total_threads 个Cookie
+        cookies_to_use = self.cookies[:total_threads]
+        for i, cookie_string in enumerate(cookies_to_use):
             checker = FriendChecker(cookie_string, headless=self.headless, thread_index=i, total_threads=total_threads)
             self._checkers.append(checker)
         
@@ -150,59 +160,31 @@ class CheckWorker(QThread):
             
             self.progress_signal.emit(f"✓ 所有浏览器初始化完成，共 {len(initialized_checkers)} 个可用")
             
-            # 第二步：使用线程池并行执行任务
+            # 第二步：将所有链接放入队列（线程安全）
+            for url, name in self.profiles:
+                self._profile_queue.put((url, name))
+            
+            # 第三步：使用线程池并行执行任务
             # max_workers 设置为已初始化的 checker 数量
             self._executor = ThreadPoolExecutor(max_workers=len(initialized_checkers))
             
-            # 创建任务列表
-            future_to_profile = {}
-            for i, (url, name) in enumerate(self.profiles):
-                # 检查是否被停止
-                with QMutexLocker(self._mutex):
-                    if not self._is_running:
-                        self.progress_signal.emit("检查已停止")
-                        break
-                
-                # 轮询使用已初始化的checker
-                checker_index = i % len(initialized_checkers)
-                checker = initialized_checkers[checker_index]
-                
-                self.progress_signal.emit(f"正在检查: {name}...")
-                
-                # 提交任务到线程池
-                future = self._executor.submit(self._check_single_profile, checker, url, name)
-                future_to_profile[future] = (url, name)
+            # 为每个checker创建一个持续运行的任务
+            future_to_checker = {}
+            for checker in initialized_checkers:
+                future = self._executor.submit(self._process_profiles, checker)
+                future_to_checker[future] = checker
             
-            # 等待所有任务完成并收集结果
-            for future in as_completed(future_to_profile):
+            # 等待所有任务完成
+            for future in as_completed(future_to_checker):
                 # 检查是否被停止
                 with QMutexLocker(self._mutex):
                     if not self._is_running:
                         break
                 
                 try:
-                    result = future.result()
-                    url, name = result[0], result[1]
-                    
-                    # 线程安全地添加结果
-                    with QMutexLocker(self._mutex):
-                        self._results.append(result)
-                        self._completed_count += 1
-                    
-                    # 实时发送结果到主线程
-                    self.result_signal.emit(result)
-                    self.progress_signal.emit(f"✓ {name} 检查完成 ({self._completed_count}/{len(self.profiles)})")
-                    
+                    future.result()  # 等待任务完成
                 except Exception as e:
-                    url, name = future_to_profile[future]
-                    error_msg = f"检查失败: {str(e)}"
-                    result = (url, name, False, error_msg, False)
-                    
-                    with QMutexLocker(self._mutex):
-                        self._results.append(result)
-                        self._completed_count += 1
-                    
-                    self.result_signal.emit(result)
+                    print(f"处理任务时出错: {e}")
         
         except Exception as e:
             self.progress_signal.emit(f"执行过程中出错: {str(e)}")
@@ -217,6 +199,37 @@ class CheckWorker(QThread):
         
         # 发送完成信号
         self.finished_signal.emit(self._results)
+    
+    def _process_profiles(self, checker: FriendChecker):
+        """
+        持续从队列中获取链接并处理
+        
+        Args:
+            checker: FriendChecker实例
+        """
+        while True:
+            # 检查是否被停止
+            with QMutexLocker(self._mutex):
+                if not self._is_running:
+                    break
+            
+            # 从队列中获取链接并检查
+            result = self._check_single_profile(checker)
+            
+            # 如果返回None，说明队列为空，退出循环
+            if result is None:
+                break
+            
+            url, name = result[0], result[1]
+            
+            # 线程安全地添加结果
+            with QMutexLocker(self._mutex):
+                self._results.append(result)
+                self._completed_count += 1
+            
+            # 实时发送结果到主线程
+            self.result_signal.emit(result)
+            self.progress_signal.emit(f"✓ {name} 检查完成 ({self._completed_count}/{len(self.profiles)})")
 
 
 class MainWindow(QMainWindow):
@@ -237,7 +250,7 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """初始化UI"""
         self.setWindowTitle('Facebook好友可见性检查工具')
-        self.setGeometry(100, 100, 1100, 800)
+        self.setGeometry(100, 100, 600, 250)
         
         # 创建中央部件
         central_widget = QWidget()
@@ -509,7 +522,8 @@ class MainWindow(QMainWindow):
         
         # 创建并启动工作线程
         headless = self.headless_checkbox.isChecked()
-        self.worker = CheckWorker(self.profiles, cookies, headless)
+        thread_count = self.thread_spinbox.value()  # 获取设置的线程数
+        self.worker = CheckWorker(self.profiles, cookies, headless, thread_count)
         self.worker.file_path = self.file_path_edit.text()  # 传递文件路径
         self.worker.progress_signal.connect(self.on_progress)
         self.worker.finished_signal.connect(self.on_finished)
@@ -645,45 +659,33 @@ class MainWindow(QMainWindow):
         print(f"已加载配置: 线程数={thread_count}, Cookie数={len(cookies)}, 无头模式={headless}")
     
     def adjust_window_size(self, thread_count: int):
-        """根据线程数量动态调整窗口大小，使其正好排满屏幕"""
+        """根据线程数量动态调整窗口大小"""
         # 获取屏幕尺寸
         screen_width = self.screen.width()
         screen_height = self.screen.height()
         
-        # 窗口边距（留出一些空间给任务栏等）
-        margin = 50
-        available_width = screen_width - margin * 2
-        available_height = screen_height - margin * 2
+        # 设置窗口宽度（使用屏幕宽度的 40%）
+        window_width = int(screen_width * 0.4)
+        # 确保窗口宽度至少 400px
+        window_width = max(window_width, 400)
         
-        # 计算各个组件的高度
+        # 计算各个组件的高度（固定值）
         # 标题高度
-        title_height = 50
+        title_height = 30
         # 线程设置高度
-        thread_group_height = 60
-        # Cookie设置高度（根据线程数量动态计算）
-        # 每个 Cookie 行高度约 35px，加上滚动区域边距
-        cookie_row_height = 35
-        cookie_group_height = min(cookie_row_height * thread_count + 30, available_height * 0.4)
+        thread_group_height = 40
+        # Cookie设置高度（根据线程数量动态计算，但限制最大值）
+        cookie_row_height = 25
+        cookie_group_height = min(cookie_row_height * thread_count + 20, 80)
         # 文件上传高度
-        file_group_height = 60
+        file_group_height = 40
         # 按钮区域高度
-        button_height = 60
-        # 结果显示区域高度（剩余空间）
-        result_group_height = available_height - title_height - thread_group_height - cookie_group_height - file_group_height - button_height - 100
-        
-        # 确保结果区域至少有 200px 高度
-        result_group_height = max(result_group_height, 200)
+        button_height = 40
+        # 结果显示区域高度（固定值）
+        result_group_height = 80
         
         # 计算总高度
-        total_height = title_height + thread_group_height + cookie_group_height + file_group_height + button_height + result_group_height + 100
-        
-        # 确保不超过屏幕可用高度
-        total_height = min(total_height, available_height)
-        
-        # 设置窗口宽度（使用屏幕宽度的 90%）
-        window_width = int(available_width * 0.9)
-        # 确保窗口宽度至少 1000px
-        window_width = max(window_width, 1000)
+        total_height = title_height + thread_group_height + cookie_group_height + file_group_height + button_height + result_group_height + 60
         
         # 设置窗口大小
         self.resize(window_width, total_height)

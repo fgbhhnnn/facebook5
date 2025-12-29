@@ -122,6 +122,7 @@ class FriendChecker:
             
             # 检查无效链接的提示（精确匹配）
             invalid_indicators = [
+                '你暂时被禁止使用此功能',
                 '没有好友可显示',
                 '内容暂时无法显示',
                 'this content isn\'t available right now',
