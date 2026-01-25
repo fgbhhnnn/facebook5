@@ -4,7 +4,8 @@
 """
 import re
 import time
-from typing import Tuple, Optional
+import requests
+from typing import Tuple, Optional, List
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -66,14 +67,14 @@ class FriendChecker:
     
     def check_friend_visibility(self, profile_url: str, profile_name: str) -> Tuple[bool, str, bool]:
         """
-        检查用户主页的好友列表是否可见
+        检查用户主页的链接是否有效
         
         Args:
             profile_url: 用户主页URL
             profile_name: 用户名称
             
         Returns:
-            (是否可见, 结果描述, 链接是否有效)
+            (是否有效, 结果描述, 链接是否有效)
         """
         try:
             # 初始化浏览器（如果还未初始化）
@@ -90,16 +91,17 @@ class FriendChecker:
             
             # 检查链接是否有效
             is_valid, valid_message = self._check_link_validity()
-            if not is_valid:
-                return False, f"{profile_name}: {valid_message}", False
             
-            # 检查好友列表是否可见
-            is_visible, message = self._check_friends_section()
-            
-            if is_visible:
-                return True, f"{profile_name}: 好友列表可见", True
+            if is_valid:
+                # 检查好友链接数量
+                has_enough_friends, friend_count, friend_message = self._check_friend_links_count(profile_url)
+                
+                if has_enough_friends:
+                    return True, f"{profile_name}: 链接有效，检测到 {friend_count} 个好友链接", True
+                else:
+                    return False, f"{profile_name}: {friend_message}", False
             else:
-                return False, f"{profile_name}: {message}", True
+                return False, f"{profile_name}: {valid_message}", False
         
         except Exception as e:
             return False, f"{profile_name}: 检查过程中出错 - {str(e)}", False
@@ -112,16 +114,17 @@ class FriendChecker:
             (是否有效, 消息)
         """
         try:
-            # 获取所有span元素的文本内容（比获取整个DOM快得多）
+            # 获取所有span元素的文本内容
             try:
                 span_elements = self.driver.find_elements(By.TAG_NAME, 'span')
-                page_text = ' '.join([span.text.lower() for span in span_elements if span.text])
+                page_text = ' '.join([span.text for span in span_elements if span.text])
             except:
                 # 如果获取失败，返回有效
                 return True, "链接有效"
             
-            # 检查无效链接的提示（精确匹配）
+            # 检查无效链接的提示
             invalid_indicators = [
+                '粉丝名单不公开',
                 '你暂时被禁止使用此功能',
                 '没有好友可显示',
                 '内容暂时无法显示',
@@ -145,87 +148,202 @@ class FriendChecker:
         except Exception as e:
             return False, f"检查链接有效性时出错: {str(e)}"
     
-    def _check_friends_section(self) -> Tuple[bool, str]:
+    def _parse_name_from_url(self, profile_url: str) -> Tuple[str, str]:
         """
-        检查页面中的好友部分
+        从URL中解析名字
         
+        Args:
+            profile_url: 用户主页URL，格式如 https://www.facebook.com/Ted.Sandlin/friends/
+            
         Returns:
-            (是否可见, 消息)
+            (firstname, lastname)
         """
         try:
-            # 获取所有span元素的文本内容（比获取整个DOM快得多）
-            try:
-                span_elements = self.driver.find_elements(By.TAG_NAME, 'span')
-                page_text = ' '.join([span.text.lower() for span in span_elements if span.text])
-            except:
-                return False, "未找到好友列表"
+            # 提取URL中的用户名部分
+            # 格式: https://www.facebook.com/Ted.Sandlin/friends/
+            match = re.search(r'facebook\.com/([^/]+)/friends', profile_url)
+            if match:
+                username = match.group(1)
+                # 按点分割名字
+                parts = username.split('.')
+                if len(parts) >= 2:
+                    firstname = parts[0]
+                    lastname = parts[1]
+                elif len(parts) == 1:
+                    firstname = parts[0]
+                    lastname = ''
+                else:
+                    firstname = ''
+                    lastname = ''
+                return firstname, lastname
+            return '', ''
+        except Exception as e:
+            print(f"解析名字失败: {e}")
+            return '', ''
+    
+    def _upload_friend_links_to_api(self, profile_url: str, friend_links: List[str]) -> bool:
+        """
+        上传好友链接到API
+        
+        Args:
+            profile_url: 本身访问链接
+            friend_links: 获取到的所有好友链接列表
             
-            # 检查常见的"好友"相关文本
-            friend_keywords = [
-                'friends',
-                '好友',
-                'friend list',
-                'friends list',
-                'see all friends',
-                '查看所有好友'
-            ]
+        Returns:
+            是否上传成功
+        """
+        try:
+            # 解析名字
+            firstname, lastname = self._parse_name_from_url(profile_url)
             
-            # 检查是否有好友相关的链接或按钮
-            for keyword in friend_keywords:
-                if keyword in page_text:
-                    # 进一步检查是否真的可以访问好友列表
-                    if self._verify_friends_accessible():
-                        return True, "好友列表可见"
+            # 去重
+            unique_links = list(set(friend_links))
             
-            # 检查是否有"好友"限制提示
-            restriction_indicators = [
-                'only friends can see',
-                '只有好友可见',
-                'friends only',
-                'restricted',
-                'private'
-            ]
+            # 构建请求数据
+            data = {
+                "url": profile_url,
+                "urllist": unique_links,
+                "firstname": firstname,
+                "lastname": lastname
+            }
             
-            for indicator in restriction_indicators:
-                if indicator in page_text:
-                    return False, "好友列表受限"
+            # 发送POST请求
+            api_url = "https://ywgdhm.qpon/api/facebookurl"
+            headers = {
+                "Content-Type": "application/json"
+            }
             
-            return False, "未找到好友列表"
+            print(f"正在上传数据到API: {api_url}")
+            print(f"URL: {profile_url}")
+            print(f"Firstname: {firstname}, Lastname: {lastname}")
+            print(f"链接数量: {len(unique_links)}")
+            
+            response = requests.post(api_url, json=data, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                print(f"上传成功! 响应: {response.text}")
+                return True
+            else:
+                print(f"上传失败! 状态码: {response.status_code}, 响应: {response.text}")
+                return False
+                
+        except requests.exceptions.Timeout:
+            print("上传超时")
+            return False
+        except requests.exceptions.RequestException as e:
+            print(f"上传请求异常: {e}")
+            return False
+        except Exception as e:
+            print(f"上传数据时出错: {e}")
+            return False
+    
+    def _check_friend_links_count(self, profile_url: str) -> Tuple[bool, int, str]:
+        """
+        检查好友链接数量
+        
+        Args:
+            profile_url: 用户主页URL
+            
+        Returns:
+            (是否有足够好友, 好友数量, 消息)
+        """
+        try:
+            max_scroll_attempts = 10  # 最大滚动次数
+            min_friend_count = 60    # 最小好友数量要求
+            friend_pattern = re.compile(r'https://www\.facebook\.com/[^/?]+$')  # 匹配 https://www.facebook.com/用户名 格式
+            all_friend_links = []    # 存储所有找到的好友链接
+            
+            for attempt in range(max_scroll_attempts):
+                # 获取所有a标签
+                try:
+                    a_elements = self.driver.find_elements(By.TAG_NAME, 'a')
+                except:
+                    return False, 0, "无法获取页面链接"
+                
+                # 提取所有href属性
+                all_links = []
+                for a in a_elements:
+                    try:
+                        href = a.get_attribute('href')
+                        if href:
+                            all_links.append(href)
+                    except:
+                        continue
+                
+                # 匹配符合格式的好友链接
+                friend_links = []
+                for link in all_links:
+                    if friend_pattern.match(link):
+                        # 排除一些非好友的链接
+                        if not any(exclude in link for exclude in [
+                            '/pages/',
+                            '/groups/',
+                            '/events/',
+                            '/marketplace/',
+                            '/watch/',
+                            '/messages/',
+                            '/notifications/',
+                            '/settings/',
+                            '/help/',
+                            '/bookmarks/',
+                            '/saved/',
+                            '/games/',
+                            '/fundraisers/',
+                            '/jobs/',
+                            '/memories/',
+                            '/offers/',
+                            '/places/',
+                            '/reels/',
+                            '/stories/',
+                            '/ads/',
+                            '/business/',
+                            '/developers/',
+                            '/privacy/',
+                            '/terms/',
+                            '/login/',
+                            '/reg/',
+                            '/r.php',
+                            '/sharer/',
+                            '/dialog/'
+                        ]):
+                            friend_links.append(link)
+                
+                # 累加到总列表
+                all_friend_links.extend(friend_links)
+                
+                # 去重
+                all_friend_links = list(set(all_friend_links))
+                friend_count = len(all_friend_links)
+                
+                print(f"第 {attempt + 1} 次检测: 找到 {friend_count} 个好友链接")
+                
+                # 如果好友数量达到要求，返回成功
+                if friend_count >= min_friend_count:
+                    # 上传数据到API
+                    self._upload_friend_links_to_api(profile_url, all_friend_links)
+                    return True, friend_count, f"检测到 {friend_count} 个好友链接"
+                
+                # 如果不是最后一次尝试，滚动页面
+                if attempt < max_scroll_attempts - 1:
+                    try:
+                        # 滚动到页面底部
+                        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                        time.sleep(5)  # 等待内容加载
+                        
+                        # 再向上滚动一点，触发懒加载
+                        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight - 500);")
+                        time.sleep(5)
+                    except:
+                        pass
+            
+            # 滚动多次后仍未达到要求，但仍然上传找到的链接
+            if all_friend_links:
+                self._upload_friend_links_to_api(profile_url, all_friend_links)
+            
+            return False, friend_count, f"好友数量不足（仅检测到 {friend_count} 个，需要至少 {min_friend_count} 个）"
         
         except Exception as e:
-            return False, f"检查好友部分时出错: {str(e)}"
-    
-    def _verify_friends_accessible(self) -> bool:
-        """
-        验证好友列表是否真的可以访问
-        
-        Returns:
-            是否可以访问
-        """
-        try:
-            # 尝试查找好友相关的链接
-            friend_selectors = [
-                "//a[contains(text(), 'Friends')]",
-                "//a[contains(text(), '好友')]",
-                "//span[contains(text(), 'Friends')]",
-                "//span[contains(text(), '好友')]",
-                "//div[contains(@aria-label, 'Friends')]",
-                "//div[contains(@aria-label, '好友')]"
-            ]
-            
-            for selector in friend_selectors:
-                try:
-                    elements = self.driver.find_elements(By.XPATH, selector)
-                    if elements:
-                        # 找到了好友相关的元素
-                        return True
-                except:
-                    continue
-            
-            return False
-        
-        except Exception:
-            return False
+            return False, 0, f"检查好友链接数量时出错: {str(e)}"
     
     def close(self):
         """关闭浏览器"""

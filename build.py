@@ -1,5 +1,5 @@
 """
-Facebook好友可见性检查工具 - 打包脚本
+FacebookFriendChecker - 打包脚本
 """
 import os
 import sys
@@ -43,7 +43,7 @@ def build_exe():
             print("使用命令行参数进行打包...")
             cmd = [
                 sys.executable, "-m", "PyInstaller",
-                "--name=Facebook好友可见性检查工具",
+                "--name=FacebookFriendChecker",
                 "--windowed",  # 不显示控制台窗口
                 "--onefile",   # 打包成单个exe文件
                 "--add-data=config;config",  # 添加配置目录
@@ -69,7 +69,7 @@ def create_portable_package():
     os.makedirs(release_dir)
     
     # 复制exe文件
-    exe_source = os.path.join("dist", "Facebook好友可见性检查工具.exe")
+    exe_source = os.path.join("dist", "FacebookFriendChecker.exe")
     if os.path.exists(exe_source):
         shutil.copy2(exe_source, release_dir)
         print(f"✓ 已复制 {exe_source} 到 {release_dir}")
@@ -83,7 +83,7 @@ def create_portable_package():
         print(f"✓ 已复制示例链接文件到 {release_dir}")
     
     # 创建说明文件
-    readme_content = """Facebook好友可见性检查工具 v1.0
+    readme_content = """FacebookFriendChecker v1.0
 
 使用说明：
 1. 运行 FacebookFriendChecker.exe
@@ -143,7 +143,7 @@ def clean_build_files():
 def main():
     """主函数"""
     print("=" * 60)
-    print("  Facebook好友可见性检查工具 - 构建脚本")
+    print("  FacebookFriendChecker - 构建脚本")
     print("=" * 60)
     print()
     

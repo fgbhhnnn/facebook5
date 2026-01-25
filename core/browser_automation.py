@@ -5,7 +5,7 @@
 import time
 import random
 from typing import Optional
-import undetected_chromedriver as uc
+from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -100,14 +100,14 @@ class BrowserAutomation:
             thread_index: 当前线程索引（从0开始）
             total_threads: 总线程数
         """
-        self.driver: Optional[uc.Chrome] = None
+        self.driver: Optional[webdriver.Chrome] = None
         self.headless = headless
         self.thread_index = thread_index
         self.total_threads = total_threads
     
-    def create_driver(self) -> uc.Chrome:
+    def create_driver(self) -> webdriver.Chrome:
         """
-        创建Chrome浏览器驱动（使用undetected-chromedriver）
+        创建Chrome浏览器驱动（使用标准selenium）
         
         Returns:
             Chrome WebDriver实例
@@ -151,7 +151,7 @@ class BrowserAutomation:
         # 设置随机时区
         chrome_options.add_argument(f'--timezone={fingerprint["timezone"]}')
         
-        # 添加更多反检测参数（undetected-chromedriver兼容）
+        # 添加更多反检测参数
         chrome_options.add_argument('--disable-web-security')
         chrome_options.add_argument('--allow-running-insecure-content')
         chrome_options.add_argument('--disable-features=VizDisplayCompositor')
@@ -168,22 +168,11 @@ class BrowserAutomation:
         chrome_options.add_experimental_option('prefs', prefs)
         
         try:
-            # 使用undetected-chromedriver创建驱动
-            print("正在初始化Chrome浏览器（使用undetected-chromedriver）...")
+            # 使用标准selenium创建驱动
+            print("正在初始化Chrome浏览器（使用标准selenium）...")
             
-            # 创建驱动，undetected-chromedriver会自动处理ChromeDriver的下载和配置
-            # 添加更多参数来避免版本检测问题
-            self.driver = uc.Chrome(
-                options=chrome_options,
-                version_main=None,  # 自动检测Chrome版本
-                use_subprocess=True,  # 使用子进程
-                keep_alive=True,  # 保持连接
-                driver_executable_path=None,  # 让undetected-chromedriver自动管理driver
-                browser_executable_path=None,  # 自动查找Chrome浏览器
-                suppress_welcome=True,  # 抑制欢迎信息
-                no_sandbox=True,  # 禁用沙箱
-                disable_gpu=True  # 禁用GPU
-            )
+            # 创建驱动
+            self.driver = webdriver.Chrome(options=chrome_options)
             
             # 设置隐式等待
             self.driver.implicitly_wait(BROWSER_CONFIG['implicit_wait'])
@@ -208,8 +197,9 @@ class BrowserAutomation:
             raise Exception(
                 f"无法启动Chrome浏览器。请确保：\n"
                 f"1. 已安装Chrome浏览器\n"
-                f"2. 网络连接正常（需要下载ChromeDriver）\n"
-                f"3. 没有防火墙阻止程序运行\n"
+                f"2. 已安装对应版本的ChromeDriver\n"
+                f"3. ChromeDriver已添加到系统PATH\n"
+                f"4. 没有防火墙阻止程序运行\n"
                 f"错误详情: {error_msg}"
             )
     
@@ -244,7 +234,7 @@ class BrowserAutomation:
             print(f"导航到URL失败: {e}")
             return False
     
-    def wait_for_page_load(self, timeout: int = 30) -> bool:
+    def wait_for_page_load(self, timeout: int = 120) -> bool:
         """
         等待页面加载完成
         

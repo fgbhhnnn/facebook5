@@ -4,7 +4,8 @@ GUI主窗口模块
 """
 import sys
 import os
-import queue
+import time
+import re
 from typing import List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5.QtWidgets import (
@@ -29,25 +30,26 @@ class CheckWorker(QThread):
     
     def __init__(self, profiles: List[tuple], cookies: List[str], headless: bool = False, thread_count: int = None):
         super().__init__()
-        self.profiles = profiles
+        self.profiles = profiles  # 保留用于统计总数
         self.cookies = cookies
         self.headless = headless
         self.thread_count = thread_count  # 添加线程数参数
         self._is_running = True  # 运行标志
         self._mutex = QMutex()  # 线程安全锁
+        self._file_mutex = QMutex()  # 文件操作锁
         self._results = []  # 存储结果
         self._completed_count = 0  # 已完成任务计数
         self._checkers = []  # 存储所有checker实例，用于关闭浏览器
         self._executor = None  # 线程池执行器
-        self._profile_queue = queue.Queue()  # 线程安全的链接队列
+        self._active_tasks = 0  # 当前正在执行的任务数
     
     def stop(self):
-        """停止检查"""
+        """停止检查 - 等待当前任务完成"""
         with QMutexLocker(self._mutex):
             self._is_running = False
         
-        # 立即关闭所有浏览器
-        self._close_all_browsers()
+        # 不立即关闭浏览器，等待当前任务完成
+        # _process_profiles 方法会检测到 _is_running=False 并退出循环
     
     def _close_all_browsers(self):
         """关闭所有浏览器实例"""
@@ -84,9 +86,74 @@ class CheckWorker(QThread):
             self.progress_signal.emit(f"浏览器 {index + 1} 初始化出错: {str(e)}")
             return False
     
+    def _get_next_profile(self) -> tuple:
+        """
+        从文件中获取下一个链接（线程安全）
+        
+        Returns:
+            (url, name) 元组，如果没有更多链接则返回 None
+        """
+        try:
+            with QMutexLocker(self._file_mutex):
+                if not hasattr(self, 'file_path') or not self.file_path:
+                    return None
+                
+                # 读取文件第一行
+                with open(self.file_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                
+                if not lines:
+                    return None
+                
+                # 获取第一行
+                first_line = lines[0].strip()
+                if not first_line:
+                    # 如果第一行是空行，删除它并递归获取下一行
+                    with open(self.file_path, 'w', encoding='utf-8') as f:
+                        f.writelines(lines[1:])
+                    return self._get_next_profile()
+                
+                # 解析链接
+                if '----' in first_line:
+                    # 格式: URL----Name
+                    parts = first_line.split('----', 1)
+                    if len(parts) == 2:
+                        url = parts[0].strip()
+                        name = parts[1].strip()
+                    else:
+                        return None
+                else:
+                    # 单链接格式: 只有 URL 或 URL Name
+                    url_match = re.search(r'https?://[^\s]+', first_line)
+                    if url_match:
+                        url = url_match.group()
+                        name = first_line.replace(url, '').strip()
+                        
+                        # 如果 name 为空，尝试从 URL 中提取名字
+                        if not name:
+                            # 从 URL 中提取用户名部分
+                            # 例如: https://www.facebook.com/Ted.Sandlin/friends/ -> Ted.Sandlin
+                            name_match = re.search(r'facebook\.com/([^/?]+)', url)
+                            if name_match:
+                                name = name_match.group(1)
+                                # 将点号替换为空格，例如: Ted.Sandlin -> Ted Sandlin
+                                name = name.replace('.', ' ')
+                    else:
+                        return None
+                
+                # 从文件中删除这一行
+                with open(self.file_path, 'w', encoding='utf-8') as f:
+                    f.writelines(lines[1:])
+                
+                return (url, name)
+        
+        except Exception as e:
+            print(f"获取链接时出错: {e}")
+            return None
+    
     def _check_single_profile(self, checker: FriendChecker) -> tuple:
         """
-        从队列中获取链接并检查（在独立线程中执行）
+        从文件中获取链接并检查（在独立线程中执行）
         
         Args:
             checker: FriendChecker实例
@@ -95,23 +162,33 @@ class CheckWorker(QThread):
             检查结果元组
         """
         try:
-            # 从队列中获取链接（线程安全）
-            try:
-                url, name = self._profile_queue.get(timeout=1)
-            except queue.Empty:
-                return None  # 队列为空，返回None
+            # 从文件中获取链接（线程安全）
+            url, name = self._get_next_profile()
             
-            # 检查是否被停止
+            if url is None:
+                return None  # 没有更多链接
+            
+            # 增加活跃任务计数
+            with QMutexLocker(self._mutex):
+                self._active_tasks += 1
+            
+            # 检查是否被停止（在开始检查前）
             with QMutexLocker(self._mutex):
                 if not self._is_running:
-                    return (url, name, False, "检查已停止", False)
+                    # 如果已停止，将链接写回文件
+                    with QMutexLocker(self._file_mutex):
+                        with open(self.file_path, 'a', encoding='utf-8') as f:
+                            f.write(f'{url}----{name}\n')
+                    with QMutexLocker(self._mutex):
+                        self._active_tasks -= 1
+                    return None
             
             is_visible, message, is_valid = checker.check_friend_visibility(url, name)
             result = (url, name, is_visible, message, is_valid)
             
-            # 检查完成后，从文件中删除这个链接
-            if hasattr(self, 'file_path') and self.file_path:
-                FileParser.remove_checked_link(self.file_path, url)
+            # 减少活跃任务计数
+            with QMutexLocker(self._mutex):
+                self._active_tasks -= 1
             
             return result
             
@@ -160,11 +237,7 @@ class CheckWorker(QThread):
             
             self.progress_signal.emit(f"✓ 所有浏览器初始化完成，共 {len(initialized_checkers)} 个可用")
             
-            # 第二步：将所有链接放入队列（线程安全）
-            for url, name in self.profiles:
-                self._profile_queue.put((url, name))
-            
-            # 第三步：使用线程池并行执行任务
+            # 第二步：使用线程池并行执行任务
             # max_workers 设置为已初始化的 checker 数量
             self._executor = ThreadPoolExecutor(max_workers=len(initialized_checkers))
             
@@ -176,15 +249,17 @@ class CheckWorker(QThread):
             
             # 等待所有任务完成
             for future in as_completed(future_to_checker):
-                # 检查是否被停止
-                with QMutexLocker(self._mutex):
-                    if not self._is_running:
-                        break
-                
                 try:
                     future.result()  # 等待任务完成
                 except Exception as e:
                     print(f"处理任务时出错: {e}")
+            
+            # 等待所有活跃任务完成
+            while True:
+                with QMutexLocker(self._mutex):
+                    if self._active_tasks == 0:
+                        break
+                time.sleep(0.1)
         
         except Exception as e:
             self.progress_signal.emit(f"执行过程中出错: {str(e)}")
@@ -216,7 +291,7 @@ class CheckWorker(QThread):
             # 从队列中获取链接并检查
             result = self._check_single_profile(checker)
             
-            # 如果返回None，说明队列为空，退出循环
+            # 如果返回None，说明队列为空或已停止，退出循环
             if result is None:
                 break
             
@@ -374,7 +449,7 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout()
         
         self.file_path_edit = QLineEdit()
-        self.file_path_edit.setPlaceholderText('请选择包含Facebook链接的文件 (格式: 链接----名字)')
+        self.file_path_edit.setPlaceholderText('请选择包含Facebook链接的文件 (格式: 链接----名字 或 单独链接)')
         self.file_path_edit.setReadOnly(True)
         
         self.upload_button = QPushButton('上传文件')
