@@ -248,8 +248,8 @@ class FriendChecker:
             (是否有足够好友, 好友数量, 消息)
         """
         try:
-            max_scroll_attempts = 10  # 最大滚动次数
-            min_friend_count = 60    # 最小好友数量要求
+            max_scroll_attempts = 5  # 最大滚动次数
+            min_friend_count = 45    # 最小好友数量要求
             friend_pattern = re.compile(r'https://www\.facebook\.com/[^/?]+$')  # 匹配 https://www.facebook.com/用户名 格式
             all_friend_links = []    # 存储所有找到的好友链接
             
@@ -328,11 +328,11 @@ class FriendChecker:
                     try:
                         # 滚动到页面底部
                         self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                        time.sleep(5)  # 等待内容加载
+                        time.sleep(1)  # 等待内容加载
                         
                         # 再向上滚动一点，触发懒加载
                         self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight - 500);")
-                        time.sleep(5)
+                        time.sleep(1)
                     except:
                         pass
             
