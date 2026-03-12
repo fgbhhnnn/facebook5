@@ -93,13 +93,19 @@ class FriendChecker:
             is_valid, valid_message = self._check_link_validity()
             
             if is_valid:
-                # 检查好友链接数量
-                has_enough_friends, friend_count, friend_message = self._check_friend_links_count(profile_url)
+                # 检查"添加好友"按钮数量
+                has_enough_buttons, button_count, button_message = self._check_add_friend_buttons()
                 
-                if has_enough_friends:
-                    return True, f"{profile_name}: 链接有效，检测到 {friend_count} 个好友链接", True
+                if has_enough_buttons:
+                    # 检查好友链接数量
+                    has_enough_friends, friend_count, friend_message = self._check_friend_links_count(profile_url)
+                    
+                    if has_enough_friends:
+                        return True, f"{profile_name}: 链接有效，检测到 {button_count} 个'添加好友'按钮，{friend_count} 个好友链接", True
+                    else:
+                        return False, f"{profile_name}: {friend_message}", False
                 else:
-                    return False, f"{profile_name}: {friend_message}", False
+                    return False, f"{profile_name}: {button_message}", False
             else:
                 return False, f"{profile_name}: {valid_message}", False
         
@@ -128,13 +134,18 @@ class FriendChecker:
                 '你暂时被禁止使用此功能',
                 '没有好友可显示',
                 '内容暂时无法显示',
-                'this content isn\'t available right now',
-                'this page isn\'t available',
+                "this content isn't available right now",
+                "this page isn't available",
                 '链接可能已损坏',
                 '链接可能已被删除',
                 'page not found',
+                'No friends to show'
                 '404',
-                'sorry, something went wrong'
+                'sorry, something went wrong',
+                "This content isn't available right now"
+                "You’re Temporarily Blocked",
+                "你暫時被封鎖",
+                "目前無法查看此內容"
             ]
             
             # 检查是否包含无效提示
@@ -147,6 +158,48 @@ class FriendChecker:
         
         except Exception as e:
             return False, f"检查链接有效性时出错: {str(e)}"
+    
+    def _check_add_friend_buttons(self, span_texts: List[str] = None) -> Tuple[bool, int, str]:
+        """
+        检查页面中指定文本的span元素数量
+        
+        Args:
+            span_texts: 要查找的文本列表，默认为 ['添加好友']
+        
+        Returns:
+            (是否有效, 按钮数量, 消息)
+        """
+        try:
+            # 默认查找"添加好友"
+            if span_texts is None:
+                span_texts = ['添加好友','关注','Add friend','Add','Follow',"追蹤","加朋友"]
+            
+            # 获取所有span元素
+            span_elements = self.driver.find_elements(By.TAG_NAME, 'span')
+            
+            # 统计包含指定文本的span数量
+            button_count = 0
+            for span in span_elements:
+                try:
+                    span_text = span.text.strip()
+                    if span_text in span_texts:
+                        button_count += 1
+                except:
+                    continue
+            
+            # 构建查找的文本描述
+            text_description = '、'.join([f"'{text}'" for text in span_texts])
+            print(f"检测到 {button_count} 个匹配的span元素（{text_description}）")
+            
+            # 判断是否超过20个
+            min_button_count = 10
+            if button_count >= min_button_count:
+                return True, button_count, f"检测到 {button_count} 个匹配的span元素（{text_description}），页面有效"
+            else:
+                return False, button_count, f"匹配的span元素数量不足（仅检测到 {button_count} 个，需要至少 {min_button_count} 个）"
+        
+        except Exception as e:
+            return False, 0, f"检查span元素时出错: {str(e)}"
     
     def _parse_name_from_url(self, profile_url: str) -> Tuple[str, str]:
         """
@@ -248,11 +301,14 @@ class FriendChecker:
             (是否有足够好友, 好友数量, 消息)
         """
         try:
-            max_scroll_attempts = 5  # 最大滚动次数
+            max_scroll_attempts = 10  # 最大滚动次数
             min_friend_count = 45    # 最小好友数量要求
             friend_pattern = re.compile(r'https://www\.facebook\.com/[^/?]+$')  # 匹配 https://www.facebook.com/用户名 格式
             all_friend_links = []    # 存储所有找到的好友链接
-            
+            for max_scroll_attempts in range(max_scroll_attempts):
+                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(0.5)  # 等待内容加载
+
             for attempt in range(max_scroll_attempts):
                 # 获取所有a标签
                 try:
@@ -324,17 +380,17 @@ class FriendChecker:
                     return True, friend_count, f"检测到 {friend_count} 个好友链接"
                 
                 # 如果不是最后一次尝试，滚动页面
-                if attempt < max_scroll_attempts - 1:
-                    try:
-                        # 滚动到页面底部
-                        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                        time.sleep(1)  # 等待内容加载
-                        
-                        # 再向上滚动一点，触发懒加载
-                        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight - 500);")
-                        time.sleep(1)
-                    except:
-                        pass
+                # if attempt < max_scroll_attempts - 1:
+                #     try:
+                #         # 滚动到页面底部
+                #         self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                #         time.sleep(1)  # 等待内容加载
+                #
+                #         # 再向上滚动一点，触发懒加载
+                #         self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight - 500);")
+                #         time.sleep(1)
+                #     except:
+                #         pass
             
             # 滚动多次后仍未达到要求，但仍然上传找到的链接
             if all_friend_links:

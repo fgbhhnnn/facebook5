@@ -43,9 +43,6 @@ class FingerprintGenerator:
     # 常见的语言设置
     LANGUAGES = [
         'zh-CN,zh;q=0.9,en;q=0.8',
-        'en-US,en;q=0.9',
-        'zh-CN,zh;q=0.9',
-        'en-GB,en;q=0.9',
     ]
     
     # 常见的时区
